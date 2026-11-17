@@ -1,7 +1,6 @@
 // Setup type definitions for built-in Supabase Runtime APIs
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import OpenAI from "npm:openai";
 import { SUPABASE_PUBLISHABLE_KEY } from "../_shared/supabaseKeys.ts";
 import {
   chooseLabel,
@@ -11,10 +10,12 @@ import {
 
 // Load environment variables
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+// CHANGED FROM THE COURSE VERSION: this function calls Google's Gemini API
+// instead of OpenAI, because OpenAI declined the student's card.
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 
-// The OpenAI model that suggests the labels.
-const OPENAI_MODEL = "gpt-4o-mini";
+// The Gemini model that suggests the labels.
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -64,11 +65,6 @@ Deno.serve(async (req) => {
 
     if (error) throw error;
 
-    // Initialize OpenAI
-    const openai = new OpenAI({
-      apiKey: OPENAI_API_KEY,
-    });
-
     // The existing labels: the default ones plus every label the user has
     // already used. Row Level Security limits this to the user's own tasks.
     const { data: labelRows, error: labelsError } = await supabaseClient
@@ -83,7 +79,7 @@ Deno.serve(async (req) => {
       (labelRows ?? []).map((row: { label: string | null }) => row.label)
     );
 
-    // Get label suggestion from OpenAI
+    // Get label suggestion from Gemini
     const prompt = `You choose a label for a task in a to-do list app.
 
 Task title: "${title}"
@@ -98,14 +94,30 @@ Rules:
 
 Reply with just the label and nothing else.`;
 
-    const completion = await openai.chat.completions.create({
-      messages: [{ role: "user", content: prompt }],
-      model: OPENAI_MODEL,
-      temperature: 0.3,
-      max_tokens: 16,
-    });
+    const geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY ?? "",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 64,
+          },
+        }),
+      }
+    );
+    if (!geminiResponse.ok) {
+      throw new Error(`Gemini error ${geminiResponse.status}: ${await geminiResponse.text()}`);
+    }
+    const completion = await geminiResponse.json();
 
-    const suggestedLabel = completion.choices[0].message.content;
+    const suggestedLabel: string | null =
+      completion.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
 
     console.log(`✨ AI Suggested Label: ${suggestedLabel}`);
 
